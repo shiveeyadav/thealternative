@@ -8,6 +8,7 @@ import {
 } from 'react';
 import {
   signInWithPopup,
+  getAdditionalUserInfo,
   GoogleAuthProvider,
   onAuthStateChanged,
   signOut as signOutFirebase,
@@ -29,7 +30,7 @@ import {
   userBookmarksCollection
 } from '@lib/firebase/collections';
 import { getRandomId, getRandomInt } from '@lib/random';
-import { checkUsernameAvailability } from '@lib/firebase/utils';
+import { checkUsernameAvailability, saveContactEmail } from '@lib/firebase/utils';
 import type { ReactNode } from 'react';
 import type { User as AuthUser } from 'firebase/auth';
 import type { WithFieldValue } from 'firebase/firestore';
@@ -46,7 +47,11 @@ type AuthContext = {
   userBookmarks: Bookmark[] | null;
   signOut: () => Promise<void>;
   signInWithGoogle: () => Promise<void>;
-  signUpWithEmail: (name: string, email: string, password: string) => Promise<void>;
+  signUpWithEmail: (
+    name: string,
+    email: string,
+    password: string
+  ) => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
 };
 
@@ -90,7 +95,9 @@ export function AuthContextProvider({
         const normalizeName = displayName.replace(/\s/g, '').toLowerCase();
         const randomInt = getRandomInt(1, 10_000);
         randomUsername = `${normalizeName}${randomInt}`;
-        const isUsernameAvailable = await checkUsernameAvailability(randomUsername);
+        const isUsernameAvailable = await checkUsernameAvailability(
+          randomUsername
+        );
         if (isUsernameAvailable) available = true;
       }
 
@@ -154,6 +161,32 @@ export function AuthContextProvider({
     return unsubscribe;
   }, [manageUser]);
 
+  // record the sign-in country once per user (server ignores repeats);
+  // the session flag just avoids a request on every page load
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const flag = `geo-recorded-${user.id}`;
+
+    try {
+      if (sessionStorage.getItem(flag)) return;
+      sessionStorage.setItem(flag, '1');
+    } catch {
+      // storage blocked — fine, the server dedupes
+    }
+
+    void auth.currentUser
+      ?.getIdToken()
+      .then((idToken) =>
+        fetch('/api/geo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken })
+        })
+      )
+      .catch(() => undefined);
+  }, [user?.id]);
+
   useEffect(() => {
     if (!user) return;
 
@@ -181,7 +214,16 @@ export function AuthContextProvider({
   const signInWithGoogle = async (): Promise<void> => {
     try {
       const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
+      provider.addScope('email');
+      const result = await signInWithPopup(auth, provider);
+
+      // Some Google accounts come back with no email on the Auth record. Keep
+      // the address Google sent so round-ups and activity emails can reach them.
+      const hasEmail =
+        result.user.email || result.user.providerData.some((p) => p.email);
+      const profileEmail = getAdditionalUserInfo(result)?.profile?.email;
+      if (!hasEmail && typeof profileEmail === 'string' && profileEmail)
+        void saveContactEmail(result.user.uid, profileEmail).catch(() => undefined);
     } catch (err) {
       setError(err as Error);
     }

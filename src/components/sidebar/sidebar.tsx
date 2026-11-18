@@ -2,9 +2,11 @@ import Link from 'next/link';
 import { useAuth } from '@lib/context/auth-context';
 import { useWindow } from '@lib/context/window-context';
 import { useModal } from '@lib/hooks/useModal';
+import { useConversations } from '@lib/hooks/useConversations';
 import { Modal } from '@components/modal/modal';
 import { Input } from '@components/input/input';
 import { CustomIcon } from '@components/ui/custom-icon';
+import { HeroIcon } from '@components/ui/hero-icon';
 import { Button } from '@components/ui/button';
 import { SidebarLink } from './sidebar-link';
 import { MoreSettings } from './more-settings';
@@ -17,6 +19,7 @@ export type NavLink = {
   iconName: IconName;
   disabled?: boolean;
   canBeHidden?: boolean;
+  badge?: number;
 };
 
 const navLinks: Readonly<NavLink[]> = [
@@ -24,6 +27,11 @@ const navLinks: Readonly<NavLink[]> = [
     href: '/home',
     linkName: 'Home',
     iconName: 'HomeIcon'
+  },
+  {
+    href: '/search',
+    linkName: 'Search',
+    iconName: 'MagnifyingGlassIcon'
   },
   {
     href: '/trends',
@@ -37,9 +45,39 @@ const navLinks: Readonly<NavLink[]> = [
     iconName: 'BellIcon'
   },
   {
+    href: '/messages',
+    linkName: 'Messages',
+    iconName: 'EnvelopeIcon'
+  },
+  {
     href: '/bookmarks',
     linkName: 'Bookmarks',
     iconName: 'BookmarkIcon',
+    canBeHidden: true
+  },
+  {
+    href: '/people',
+    linkName: 'People',
+    iconName: 'UserGroupIcon',
+    canBeHidden: true
+  }
+];
+
+/**
+ * Shown to signed-out visitors, who typically arrive on a profile or post
+ * from a search engine. Only the publicly browsable pages appear; everything
+ * else needs an account.
+ */
+const publicNavLinks: Readonly<NavLink[]> = [
+  {
+    href: '/search',
+    linkName: 'Search',
+    iconName: 'MagnifyingGlassIcon'
+  },
+  {
+    href: '/trends',
+    linkName: 'Explore',
+    iconName: 'HashtagIcon',
     canBeHidden: true
   },
   {
@@ -57,6 +95,8 @@ export function Sidebar(): JSX.Element {
   const { open, openModal, closeModal } = useModal();
 
   const username = user?.username as string;
+
+  const { unreadTotal } = useConversations(user?.id ?? null);
 
   return (
     <header
@@ -79,7 +119,7 @@ export function Sidebar(): JSX.Element {
       >
         <section className='flex flex-col justify-center gap-2 xs:items-center xl:items-stretch'>
           <h1 className='hidden xs:flex'>
-            <Link href='/home'>
+            <Link href={user ? '/home' : '/'}>
               <a
                 className='custom-button main-tab text-accent-blue transition hover:bg-light-primary/10 
                            focus-visible:bg-accent-blue/10 focus-visible:!ring-accent-blue/80
@@ -90,17 +130,45 @@ export function Sidebar(): JSX.Element {
             </Link>
           </h1>
           <nav className='flex items-center justify-around xs:flex-col xs:justify-center xl:block'>
-            {navLinks.map(({ ...linkData }) => (
-              <SidebarLink {...linkData} key={linkData.href} />
+            {/* Signed-out visitors land here from search, so they get the
+                browsable pages only — the rest needs an account. */}
+            {(user ? navLinks : publicNavLinks).map(({ ...linkData }) => (
+              <SidebarLink
+                {...linkData}
+                badge={linkData.href === '/messages' ? unreadTotal : undefined}
+                key={linkData.href}
+              />
             ))}
-            <SidebarLink
-              href={`/user/${username}`}
-              username={username}
-              linkName='Profile'
-              iconName='UserIcon'
-            />
-            {!isMobile && <MoreSettings />}
+            {user && (
+              <SidebarLink
+                href={`/user/${username}`}
+                username={username}
+                linkName='Profile'
+                iconName='UserIcon'
+              />
+            )}
+            {user && !isMobile && <MoreSettings />}
           </nav>
+          {!user && (
+            <Link href='/'>
+              <a
+                className='accent-tab absolute right-4 -translate-y-[72px] rounded-full bg-main-accent px-4 py-2
+                           text-center text-lg font-bold text-white outline-none transition hover:brightness-90
+                           active:brightness-75 xs:static xs:translate-y-0 xl:w-11/12'
+              >
+                <span className='hidden xl:block'>Log in</span>
+                {/* narrow screens get a sign-in icon — showing the site logo
+                    here read as decoration rather than a way to log in */}
+                <span className='block xl:hidden'>
+                  <HeroIcon
+                    className='h-6 w-6'
+                    iconName='ArrowRightOnRectangleIcon'
+                  />
+                </span>
+              </a>
+            </Link>
+          )}
+          {user && (
           <Button
             className='accent-tab absolute right-4 -translate-y-[72px] bg-main-accent text-lg font-bold text-white
                        outline-none transition hover:brightness-90 active:brightness-75 xs:static xs:translate-y-0
@@ -113,8 +181,9 @@ export function Sidebar(): JSX.Element {
             />
             <p className='hidden xl:block'>Post</p>
           </Button>
+          )}
         </section>
-        {!isMobile && <SidebarProfile />}
+        {user && !isMobile && <SidebarProfile />}
       </div>
     </header>
   );

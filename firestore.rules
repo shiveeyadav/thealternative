@@ -18,16 +18,39 @@ service cloud.firestore {
       return (images is list && images.size() <= 4) || images == null;
     }
 
+    function onlyOwnIdChanged(field) {
+      let before = resource.data.get(field, []).toSet();
+      let after = request.resource.data.get(field, []).toSet();
+      return after.difference(before).hasOnly([request.auth.uid])
+             && before.difference(after).hasOnly([request.auth.uid]);
+    }
+
+    function repliesMovedByOne() {
+      let before = resource.data.get('userReplies', 0);
+      let after = request.resource.data.get('userReplies', 0);
+      return after is int && after >= 0
+             && (after == before || after == before + 1 || after == before - 1);
+    }
+
     // Fields any signed-in user may change on someone else's tweet: likes,
     // retweets and the reply counter. Everything else (text, images,
     // createdBy, ...) stays owner/admin only.
+    // ...and only in the way the app itself does it: add or remove the caller's own
+    // uid from userLikes / userRetweets, and move the reply counter by one. Without
+    // this, any signed-in user could wipe or forge other people's likes and retweets.
     function onlySocialFieldsChanged() {
       return request.resource.data.diff(resource.data).affectedKeys()
-               .hasOnly(['userLikes', 'userRetweets', 'userReplies', 'updatedAt']);
+               .hasOnly(['userLikes', 'userRetweets', 'userReplies', 'updatedAt'])
+             && onlyOwnIdChanged('userLikes')
+             && onlyOwnIdChanged('userRetweets')
+             && repliesMovedByOne();
     }
 
     match /tweets/{tweetId} {
-      allow read: if request.auth != null;
+      // Public, like an open Instagram profile: posts are readable by anyone,
+      // signed in or not, so they can be shared and indexed by search engines.
+      // Writing still requires auth and ownership.
+      allow read: if true;
       allow create: if isAuthorized(request.resource.data.createdBy)
                        && isValidText(request.resource.data.text)
                        && isValidImages(request.resource.data.images);
@@ -39,12 +62,81 @@ service cloud.firestore {
       allow delete: if isAuthorized(resource.data.createdBy);
     }
 
-    // User profile — readable by any logged-in user, writable only by owner or admin
+    // Following someone writes to *their* profile (the followers list), which
+    // the owner-only rule below would reject — so following was failing
+    // entirely. Allow exactly that write: only `followers` (and updatedAt)
+    // may change, and the only id added or removed is the caller's own.
+    function onlyOwnFollowChanged() {
+      let before = resource.data.get('followers', []).toSet();
+      let after = request.resource.data.get('followers', []).toSet();
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['followers', 'updatedAt'])
+             && after.difference(before).hasOnly([request.auth.uid])
+             && before.difference(after).hasOnly([request.auth.uid]);
+    }
+
+    // Public profile. The document holds no contact details — email lives in
+    // Firebase Auth, not here — so this exposes only what a profile page shows.
     match /users/{userId} {
-      allow read: if request.auth != null;
+      allow read: if true;
       allow create: if request.auth.uid == userId;
-      allow update: if isAuthorized(userId);
+      allow update: if isAuthorized(userId)
+                       || (request.auth != null && onlyOwnFollowChanged());
       allow delete: if isAdmin();
+    }
+
+    // Direct messages. The conversation id is the two user ids, sorted and
+    // joined with "__", so a pair can only ever have one conversation and a
+    // third person can't create or join it.
+    function isParticipant(conversation) {
+      return request.auth != null && request.auth.uid in conversation.participants;
+    }
+
+    function conversationIdMatches(conversationId, participants) {
+      return participants is list
+             && participants.size() == 2
+             && participants[0] < participants[1]
+             && conversationId == participants[0] + '__' + participants[1];
+    }
+
+    match /conversations/{conversationId} {
+      // a missing conversation may be checked by the two people it would belong to
+      allow get: if request.auth != null
+                    && (resource == null
+                          ? conversationId.split('__').hasAny([request.auth.uid])
+                          : request.auth.uid in resource.data.participants);
+      allow list: if request.auth != null
+                     && request.auth.uid in resource.data.participants;
+      allow create: if request.auth != null
+                       && request.auth.uid in request.resource.data.participants
+                       && conversationIdMatches(conversationId, request.resource.data.participants)
+                       && request.resource.data.blockedBy == [];
+      // participants never change; you can only add/remove yourself in blockedBy
+      allow update: if isParticipant(resource.data)
+                       && request.resource.data.participants == resource.data.participants
+                       && request.resource.data.diff(resource.data).affectedKeys()
+                            .hasOnly(['lastMessage', 'unread', 'updatedAt', 'blockedBy'])
+                       && request.resource.data.blockedBy.toSet().difference(resource.data.blockedBy.toSet()).hasOnly([request.auth.uid])
+                       && resource.data.blockedBy.toSet().difference(request.resource.data.blockedBy.toSet()).hasOnly([request.auth.uid]);
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        function conversation() {
+          return get(/databases/$(database)/documents/conversations/$(conversationId)).data;
+        }
+
+        allow read: if isParticipant(conversation());
+        allow create: if isParticipant(conversation())
+                         && conversation().blockedBy.size() == 0
+                         && request.resource.data.from == request.auth.uid
+                         && request.resource.data.text is string
+                         && request.resource.data.text.size() > 0
+                         && request.resource.data.text.size() <= 2000
+                         && request.resource.data.keys().hasOnly(['from', 'text', 'createdAt']);
+        allow update: if false;
+        allow delete: if request.auth != null
+                         && (resource.data.from == request.auth.uid || isAdmin());
+      }
     }
 
     // Notifications live under the recipient, but are written by whoever
